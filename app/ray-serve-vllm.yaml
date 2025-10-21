@@ -1,0 +1,173 @@
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-serve
+  namespace: default
+spec:
+  serviceUnhealthySecondThreshold: 900
+  deploymentUnhealthySecondThreshold: 900
+  serveConfigV2: |
+    applications:
+    - name: vllm-app
+      import_path: serve_app.vllm_serve:app
+      runtime_env:
+        pip:
+          - vllm==0.6.3.post1
+        env_vars:
+          PYTHONPATH: "/home/ray"
+          VLLM_USE_V1: "1"
+  rayClusterConfig:
+    rayVersion: '2.50.0'
+    enableInTreeAutoscaling: false
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+        num-cpus: '0'
+        redis-password: ''
+        metrics-export-port: '8080'
+      serviceType: ClusterIP
+      template:
+        spec:
+          serviceAccountName: model-cache-sa
+          containers:
+          - name: ray-head
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            - containerPort: 8080
+              name: metrics
+            resources:
+              requests:
+                cpu: "2"
+                memory: "8Gi"
+              limits:
+                cpu: "4"
+                memory: "16Gi"
+            env:
+            - name: RAY_REDIS_ADDRESS
+              value: "redis-svc.default.svc.cluster.local:6379"
+            - name: RAY_external_storage_namespace
+              value: "vllm-serve"
+            - name: RAY_gcs_rpc_server_reconnect_timeout_s
+              value: "300"
+            volumeMounts:
+            - name: s3-storage
+              mountPath: /s3
+              readOnly: true
+            - name: ray-code
+              mountPath: /home/ray/serve_app
+          volumes:
+          - name: s3-storage
+            persistentVolumeClaim:
+              claimName: s3-pvc
+          - name: ray-code
+            configMap:
+              name: ray-serve-code
+    workerGroupSpecs:
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      groupName: gpu-workers
+      rayStartParams:
+        num-cpus: '4'
+        num-gpus: '1'
+        metrics-export-port: '8080'
+      template:
+        spec:
+          serviceAccountName: model-cache-sa
+          nodeSelector:
+            karpenter.sh/nodepool: gpu-nodepool
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          containers:
+          - name: ray-worker
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            resources:
+              requests:
+                cpu: "4"
+                memory: "16Gi"
+                nvidia.com/gpu: "1"
+              limits:
+                nvidia.com/gpu: "1"
+            env:
+            - name: RAY_REDIS_ADDRESS
+              value: "redis-svc.default.svc.cluster.local:6379"
+            - name: RAY_external_storage_namespace
+              value: "vllm-serve"
+            - name: RAY_gcs_rpc_server_reconnect_timeout_s
+              value: "300"
+            volumeMounts:
+            - name: s3-storage
+              mountPath: /s3
+              readOnly: true
+            - name: ray-code
+              mountPath: /home/ray/serve_app
+            - name: shm
+              mountPath: /dev/shm
+          volumes:
+          - name: s3-storage
+            persistentVolumeClaim:
+              claimName: s3-pvc
+          - name: ray-code
+            configMap:
+              name: ray-serve-code
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-serve-worker-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      ray.io/group-name: gpu-workers
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ray-serve-code
+  namespace: default
+data:
+  vllm_serve.py: |
+    from ray import serve
+    from ray.serve.llm import LLMConfig, build_openai_app
+
+    # Configure the LLM with Ray Serve 2.50.0 best practices
+    llm_config = LLMConfig(
+        model_loading_config={
+            "model_id": "qwen-0.5b",
+            "model_source": "/s3/models/Qwen/Qwen2.5-0.5B-Instruct",
+        },
+        deployment_config={
+            "autoscaling_config": {
+                "min_replicas": 2,
+                "max_replicas": 2,
+            }
+        },
+        # Specify accelerator type for optimal scheduling
+        accelerator_type="A10G",
+        # vLLM engine configuration
+        engine_kwargs={
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.9,
+            "max_model_len": 2048,
+            "trust_remote_code": True,
+        },
+    )
+
+    # Build OpenAI-compatible app with the LLM config
+    app = build_openai_app({"llm_configs": [llm_config]})

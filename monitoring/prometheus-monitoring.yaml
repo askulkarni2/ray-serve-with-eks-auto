@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ray-head-monitor
+  namespace: default
+  labels:
+    app: ray
+spec:
+  selector:
+    matchLabels:
+      ray.io/node-type: head
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ray-worker-monitor
+  namespace: default
+  labels:
+    app: ray
+spec:
+  selector:
+    matchLabels:
+      ray.io/node-type: worker
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ray-serve-monitor
+  namespace: default
+  labels:
+    app: ray-serve
+spec:
+  selector:
+    matchLabels:
+      ray.io/serve: "true"
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics

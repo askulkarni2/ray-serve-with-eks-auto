@@ -1,0 +1,89 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-load-test
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 3600  # Keep for 1 hour after completion
+  template:
+    metadata:
+      labels:
+        app: k6-load-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: k6
+        image: grafana/k6:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "==================================="
+          echo "K6 Load Test for Ray Serve vLLM"
+          echo "==================================="
+          echo ""
+          
+          # Get NLB endpoint
+          echo "Fetching NLB endpoint..."
+          NLB_HOSTNAME=$(kubectl get svc ray-serve-nlb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          
+          if [ -z "$NLB_HOSTNAME" ]; then
+            echo "Using internal service endpoint"
+            export NLB_ENDPOINT="http://vllm-serve-serve-svc:8000"
+          else
+            export NLB_ENDPOINT="http://${NLB_HOSTNAME}"
+          fi
+          
+          echo "Target endpoint: $NLB_ENDPOINT"
+          echo ""
+          
+          # Test connectivity first
+          echo "Testing connectivity..."
+          if ! wget -q --spider --timeout=5 "$NLB_ENDPOINT/health" 2>/dev/null; then
+            echo "Warning: Health check failed, but continuing..."
+          else
+            echo "✓ Health check passed"
+          fi
+          echo ""
+          
+          echo "Starting 60-minute load test..."
+          echo "Stages:"
+          echo "  0-2min:  Quick ramp up to 15 VUs"
+          echo "  2-57min: Hold at 15 VUs"
+          echo "  57-60min: Ramp down to 0"
+          echo ""
+          
+          # Run k6 with summary output
+          k6 run \
+            --summary-export=/tmp/summary.json \
+            --out json=/tmp/results.json \
+            /scripts/load-test.js
+          
+          echo ""
+          echo "==================================="
+          echo "Load test completed!"
+          echo "==================================="
+          
+          # Show summary
+          if [ -f /tmp/summary.json ]; then
+            echo ""
+            echo "Summary:"
+            cat /tmp/summary.json
+          fi
+        env:
+        - name: K6_NO_USAGE_REPORT
+          value: "true"
+        volumeMounts:
+        - name: k6-script
+          mountPath: /scripts
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+      volumes:
+      - name: k6-script
+        configMap:
+          name: k6-script

@@ -1,0 +1,69 @@
+{
+  "dashboard": {
+    "title": "Ray Serve vLLM Metrics",
+    "tags": ["ray", "vllm", "ml"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Ray Serve Requests per Second",
+        "targets": [
+          {
+            "expr": "rate(ray_serve_num_http_requests[5m])",
+            "legendFormat": "{{deployment}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Ray Serve Request Latency (p95)",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ray_serve_request_latency_ms_bucket[5m]))",
+            "legendFormat": "{{deployment}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Active Ray Serve Replicas",
+        "targets": [
+          {
+            "expr": "ray_serve_deployment_replica_healthy",
+            "legendFormat": "{{deployment}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "GPU Utilization",
+        "targets": [
+          {
+            "expr": "ray_node_gpus_utilization",
+            "legendFormat": "{{node_id}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "GPU Memory Used",
+        "targets": [
+          {
+            "expr": "ray_node_gpu_memory_used",
+            "legendFormat": "{{node_id}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "vLLM Queue Size",
+        "targets": [
+          {
+            "expr": "ray_serve_deployment_queued_queries",
+            "legendFormat": "{{deployment}}"
+          }
+        ],
+        "type": "graph"
+      }
+    ]
+  }
+}

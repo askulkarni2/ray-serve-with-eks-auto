@@ -1,0 +1,42 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-nodepool
+spec:
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 2h
+    budgets:
+    # During upgrades, only disrupt 1 node at a time
+    # This ensures at least 2 workers remain available
+    - nodes: "1"
+      reasons:
+      - Drifted
+      - Underutilized
+      - Empty
+  template:
+    metadata:
+      labels:
+        workload-type: gpu
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+      requirements:
+        - key: eks.amazonaws.com/instance-family
+          operator: In
+          values:
+            - g6
+            - g6e
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - amd64
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand

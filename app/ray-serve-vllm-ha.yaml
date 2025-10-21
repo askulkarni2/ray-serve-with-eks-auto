@@ -1,0 +1,477 @@
+---
+# Redis StatefulSet for Ray GCS external storage (HA mode)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-svc
+  namespace: default
+spec:
+  clusterIP: None
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  selector:
+    app: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: default
+spec:
+  serviceName: redis-svc
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # Spread Redis replicas across nodes (soft constraint)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: redis
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: redis
+        image: redis:7.2-alpine
+        command:
+        - redis-server
+        - --appendonly
+        - "yes"
+        - --save
+        - "60 1"
+        - --maxmemory
+        - "768mb"
+        - --maxmemory-policy
+        - "allkeys-lru"
+        ports:
+        - containerPort: 6379
+          name: redis
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: ebs-sc
+      resources:
+        requests:
+          storage: 10Gi
+---
+# PDB for Redis
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: default
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis
+---
+# Ray Service with vLLM
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-serve
+  namespace: default
+spec:
+  serviceUnhealthySecondThreshold: 900
+  deploymentUnhealthySecondThreshold: 900
+  serveConfigV2: |
+    applications:
+    - name: vllm-app
+      import_path: serve_app.vllm_serve:deployment
+      runtime_env:
+        pip:
+          - vllm==0.6.3.post1
+        env_vars:
+          PYTHONPATH: "/home/ray"
+      deployments:
+      - name: VLLMDeployment
+        num_replicas: 3
+        ray_actor_options:
+          num_cpus: 2
+          num_gpus: 1
+        health_check_period_s: 10
+        health_check_timeout_s: 30
+  rayClusterConfig:
+    rayVersion: '2.50.0'
+    enableInTreeAutoscaling: false
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+        num-cpus: '0'
+        redis-password: ''
+        metrics-export-port: '8080'
+      serviceType: ClusterIP
+      template:
+        spec:
+          serviceAccountName: model-cache-sa
+          # Ensure head node is on a separate node from workers
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                    - key: ray.io/group-name
+                      operator: In
+                      values:
+                      - gpu-workers
+                  topologyKey: kubernetes.io/hostname
+          containers:
+          - name: ray-head
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            - containerPort: 8080
+              name: metrics
+            resources:
+              requests:
+                cpu: "2"
+                memory: "8Gi"
+              limits:
+                cpu: "4"
+                memory: "16Gi"
+            # Add health checks for the head node
+            livenessProbe:
+              httpGet:
+                path: /api/serve/applications/
+                port: 8265
+              initialDelaySeconds: 60
+              periodSeconds: 30
+              timeoutSeconds: 10
+              failureThreshold: 5
+            readinessProbe:
+              httpGet:
+                path: /api/serve/applications/
+                port: 8265
+              initialDelaySeconds: 30
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            # Graceful shutdown
+            lifecycle:
+              preStop:
+                exec:
+                  command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    # Wait for ongoing requests to complete
+                    sleep 30
+            env:
+            - name: RAY_REDIS_ADDRESS
+              value: "redis-0.redis-svc.default.svc.cluster.local:6379"
+            - name: RAY_external_storage_namespace
+              value: "vllm-serve"
+            - name: RAY_gcs_rpc_server_reconnect_timeout_s
+              value: "300"
+            volumeMounts:
+            - name: s3-storage
+              mountPath: /s3
+              readOnly: true
+            - name: ray-code
+              mountPath: /home/ray/serve_app
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: s3-storage
+            persistentVolumeClaim:
+              claimName: s3-pvc
+          - name: ray-code
+            configMap:
+              name: ray-serve-code
+    workerGroupSpecs:
+    - replicas: 3
+      minReplicas: 3
+      maxReplicas: 3
+      groupName: gpu-workers
+      rayStartParams:
+        num-cpus: '4'
+        num-gpus: '1'
+        metrics-export-port: '8080'
+      template:
+        spec:
+          serviceAccountName: model-cache-sa
+          nodeSelector:
+            karpenter.sh/nodepool: gpu-nodepool
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          # Spread workers across different nodes
+          topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                ray.io/group: gpu-workers
+          # Anti-affinity to avoid multiple workers on same node
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                  - key: ray.io/group
+                    operator: In
+                    values:
+                    - gpu-workers
+                topologyKey: kubernetes.io/hostname
+          containers:
+          - name: ray-worker
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            resources:
+              requests:
+                cpu: "4"
+                memory: "16Gi"
+                nvidia.com/gpu: "1"
+              limits:
+                nvidia.com/gpu: "1"
+            # Add health checks for workers
+            livenessProbe:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - ray health-check || exit 1
+              initialDelaySeconds: 60
+              periodSeconds: 30
+              timeoutSeconds: 10
+              failureThreshold: 5
+            readinessProbe:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - |
+                  # Check if Ray worker is healthy
+                  ray health-check || exit 1
+                  
+                  # Check if Serve deployment is running on this worker
+                  python3 -c "
+                  import ray
+                  from ray import serve
+                  import sys
+                  try:
+                      # Connect to Ray cluster
+                      ray.init(address='auto', ignore_reinit_error=True)
+                      
+                      # Check if serve is running
+                      status = serve.status()
+                      if not status.applications:
+                          sys.exit(1)
+                      
+                      # Check if any application is RUNNING with healthy replicas
+                      for app_name, app_status in status.applications.items():
+                          if app_status.status != 'RUNNING':
+                              continue
+                          
+                          # Check if any deployment has healthy replicas
+                          for deployment in app_status.deployments.values():
+                              if deployment.status == 'HEALTHY' and deployment.replica_states.get('RUNNING', 0) > 0:
+                                  sys.exit(0)
+                      
+                      # No healthy replicas found
+                      sys.exit(1)
+                  except Exception as e:
+                      print(f'Readiness check failed: {e}')
+                      sys.exit(1)
+                  " || exit 1
+              initialDelaySeconds: 60
+              periodSeconds: 15
+              timeoutSeconds: 10
+              failureThreshold: 5
+            # Graceful shutdown for workers
+            lifecycle:
+              preStop:
+                exec:
+                  command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    # Drain the worker gracefully
+                    ray stop --grace-period 30
+            env:
+            - name: RAY_REDIS_ADDRESS
+              value: "redis-0.redis-svc.default.svc.cluster.local:6379"
+            - name: RAY_external_storage_namespace
+              value: "vllm-serve"
+            - name: RAY_gcs_rpc_server_reconnect_timeout_s
+              value: "300"
+            volumeMounts:
+            - name: s3-storage
+              mountPath: /s3
+              readOnly: true
+            - name: ray-code
+              mountPath: /home/ray/serve_app
+            - name: shm
+              mountPath: /dev/shm
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: s3-storage
+            persistentVolumeClaim:
+              claimName: s3-pvc
+          - name: ray-code
+            configMap:
+              name: ray-serve-code
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+
+---
+# PDB for Ray head node
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-serve-head-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      ray.io/node-type: head
+      ray.io/cluster: vllm-serve
+---
+# PDB for Ray workers - require at least 2 available during disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-serve-worker-pdb
+  namespace: default
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      ray.io/group-name: gpu-workers
+      ray.io/cluster: vllm-serve
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ray-serve-code
+  namespace: default
+data:
+  vllm_serve.py: |
+    from ray import serve
+    from vllm import AsyncLLMEngine
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.sampling_params import SamplingParams
+    import logging
+
+    logger = logging.getLogger("ray.serve")
+
+    @serve.deployment(
+        ray_actor_options={
+            "num_gpus": 1,
+            "num_cpus": 2
+        },
+        max_ongoing_requests=10,
+        health_check_period_s=10,
+        health_check_timeout_s=30
+    )
+    class VLLMDeployment:
+        def __init__(self):
+            logger.info("Initializing vLLM engine...")
+            model_path = "/s3/models/Qwen/Qwen2.5-0.5B-Instruct"
+            
+            engine_args = AsyncEngineArgs(
+                model=model_path,
+                tensor_parallel_size=1,
+                gpu_memory_utilization=0.9,
+                max_model_len=2048,
+                trust_remote_code=True,
+                disable_log_stats=False,
+                disable_log_requests=False
+            )
+            self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+            logger.info("vLLM engine initialized successfully")
+        
+        async def check_health(self):
+            """Health check endpoint for Ray Serve"""
+            return {"status": "healthy"}
+        
+        async def __call__(self, request):
+            # Handle both dict (from Python) and Request (from HTTP)
+            if isinstance(request, dict):
+                request_dict = request
+            else:
+                # It's a Starlette Request object
+                request_dict = await request.json()
+            
+            prompt = request_dict.get("prompt", "Hello, how are you?")
+            max_tokens = request_dict.get("max_tokens", 100)
+            temperature = request_dict.get("temperature", 0.7)
+            
+            logger.info(f"Processing request - prompt: '{prompt[:50]}...', max_tokens: {max_tokens}")
+            
+            sampling_params = SamplingParams(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=0.95
+            )
+            
+            request_id = str(id(request))
+            results_generator = self.engine.generate(prompt, sampling_params, request_id)
+            
+            final_output = None
+            async for request_output in results_generator:
+                final_output = request_output
+            
+            if final_output:
+                text = final_output.outputs[0].text
+                return {
+                    "generated_text": text,
+                    "prompt": prompt,
+                    "model": "/s3/models/Qwen/Qwen2.5-0.5B-Instruct"
+                }
+            else:
+                return {"error": "No output generated"}
+
+    deployment = VLLMDeployment.bind()

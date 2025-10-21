@@ -1,0 +1,26 @@
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+
+nodeSelector:
+  karpenter.sh/nodepool: gpu-nodepool
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: karpenter.sh/nodepool
+          operator: In
+          values:
+          - gpu-nodepool
+
+# Use basic metrics without profiling
+arguments:
+  - "-f"
+  - "/etc/dcgm-exporter/dcp-metrics-included.csv"
