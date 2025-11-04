@@ -39,7 +39,7 @@ spec:
           
           # Test connectivity first
           echo "Testing connectivity..."
-          if ! wget -q --spider --timeout=5 "$NLB_ENDPOINT/health" 2>/dev/null; then
+          if ! wget -q --spider --timeout=5 "$NLB_ENDPOINT/v1/models" 2>/dev/null; then
             echo "Warning: Health check failed, but continuing..."
           else
             echo "✓ Health check passed"

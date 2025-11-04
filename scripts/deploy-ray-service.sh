@@ -43,7 +43,7 @@ echo "Step 2: Deploying KubeRay Operator..."
 helm repo add kuberay https://ray-project.github.io/kuberay-helm/ 2>/dev/null || true
 helm repo update
 helm install kuberay-operator kuberay/kuberay-operator \
-  --version 1.2.2 \
+  --version 1.4.2 \
   --create-namespace \
   --namespace kuberay-system \
   --wait

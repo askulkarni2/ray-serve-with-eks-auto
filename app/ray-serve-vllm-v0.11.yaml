@@ -1,5 +1,5 @@
 ---
-# Ray Service with vLLM (using ElastiCache Redis)
+# Ray Service with vLLM v0.11.0 using Ray Serve LLM API and RunAI Streamer
 apiVersion: ray.io/v1
 kind: RayService
 metadata:
@@ -14,30 +14,33 @@ spec:
       import_path: ray.serve.llm:build_openai_app
       runtime_env:
         pip:
+          - numpy==1.26.4
+          - pandas==2.2.3
           - vllm[runai]==0.11.0
         env_vars:
           VLLM_USE_V1: "1"
+          AWS_DEFAULT_REGION: "us-west-2"
+          AWS_REGION: "us-west-2"
       args:
         llm_configs:
           - model_loading_config:
               model_id: qwen-0.5b
-              model_source: s3://qwen-models-${AWS_ACCOUNT_ID}/models/Qwen/Qwen2.5-0.5B-Instruct
+              model_source: /s3/models/Qwen/Qwen2.5-0.5B-Instruct
             accelerator_type: L4
             deployment_config:
               autoscaling_config:
                 min_replicas: 3
                 max_replicas: 3
-              max_ongoing_requests: 10
+              max_ongoing_requests: 100
             engine_kwargs:
               load_format: runai_streamer
               tensor_parallel_size: 1
               gpu_memory_utilization: 0.9
               max_model_len: 2048
               trust_remote_code: true
-              enable_chunked_prefill: true
-              max_num_batched_tokens: 4096
+              enable_chunked_prefill: false
   rayClusterConfig:
-    rayVersion: '2.50.0'
+    rayVersion: '2.51.0'
     enableInTreeAutoscaling: false
     gcsFaultToleranceOptions:
       redisAddress: "ray-redis-cluster.dd32wx.ng.0001.usw2.cache.amazonaws.com:6379"
@@ -50,7 +53,6 @@ spec:
       serviceType: ClusterIP
       template:
         spec:
-          serviceAccountName: model-cache-sa
           # Ensure head node is on a separate node from workers
           affinity:
             podAntiAffinity:
@@ -66,7 +68,7 @@ spec:
                   topologyKey: kubernetes.io/hostname
           containers:
           - name: ray-head
-            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.51.0-py311-gpu
             ports:
             - containerPort: 6379
               name: gcs
@@ -117,20 +119,7 @@ spec:
               value: "vllm-serve"
             - name: RAY_gcs_rpc_server_reconnect_timeout_s
               value: "300"
-            volumeMounts:
-            - name: s3-storage
-              mountPath: /s3
-              readOnly: true
-            - name: ray-code
-              mountPath: /home/ray/serve_app
           terminationGracePeriodSeconds: 60
-          volumes:
-          - name: s3-storage
-            persistentVolumeClaim:
-              claimName: s3-pvc
-          - name: ray-code
-            configMap:
-              name: ray-serve-code
     workerGroupSpecs:
     - replicas: 3
       minReplicas: 3
@@ -142,7 +131,6 @@ spec:
         metrics-export-port: '8080'
       template:
         spec:
-          serviceAccountName: model-cache-sa
           nodeSelector:
             karpenter.sh/nodepool: gpu-nodepool
           tolerations:
@@ -170,7 +158,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
           containers:
           - name: ray-worker
-            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.50.0-py311-gpu
+            image: ${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.51.0-py311-gpu
             resources:
               requests:
                 cpu: "4"
@@ -194,40 +182,7 @@ spec:
                 command:
                 - /bin/sh
                 - -c
-                - |
-                  # Check if Ray worker is healthy
-                  ray health-check || exit 1
-                  
-                  # Check if Serve deployment is running on this worker
-                  python3 -c "
-                  import ray
-                  from ray import serve
-                  import sys
-                  try:
-                      # Connect to Ray cluster
-                      ray.init(address='auto', ignore_reinit_error=True)
-                      
-                      # Check if serve is running
-                      status = serve.status()
-                      if not status.applications:
-                          sys.exit(1)
-                      
-                      # Check if any application is RUNNING with healthy replicas
-                      for app_name, app_status in status.applications.items():
-                          if app_status.status != 'RUNNING':
-                              continue
-                          
-                          # Check if any deployment has healthy replicas
-                          for deployment in app_status.deployments.values():
-                              if deployment.status == 'HEALTHY' and deployment.replica_states.get('RUNNING', 0) > 0:
-                                  sys.exit(0)
-                      
-                      # No healthy replicas found
-                      sys.exit(1)
-                  except Exception as e:
-                      print(f'Readiness check failed: {e}')
-                      sys.exit(1)
-                  " || exit 1
+                - ray health-check || exit 1
               initialDelaySeconds: 60
               periodSeconds: 15
               timeoutSeconds: 10
@@ -251,8 +206,6 @@ spec:
             - name: s3-storage
               mountPath: /s3
               readOnly: true
-            - name: ray-code
-              mountPath: /home/ray/serve_app
             - name: shm
               mountPath: /dev/shm
           terminationGracePeriodSeconds: 60
@@ -260,14 +213,10 @@ spec:
           - name: s3-storage
             persistentVolumeClaim:
               claimName: s3-pvc
-          - name: ray-code
-            configMap:
-              name: ray-serve-code
           - name: shm
             emptyDir:
               medium: Memory
               sizeLimit: 10Gi
-
 ---
 # PDB for Ray head node
 apiVersion: policy/v1
@@ -280,7 +229,7 @@ spec:
   selector:
     matchLabels:
       ray.io/node-type: head
-      ray.io/cluster: vllm-serve
+      ray.io/serve: "true"
 ---
 # PDB for Ray workers - require at least 2 available during disruptions
 apiVersion: policy/v1
@@ -292,6 +241,5 @@ spec:
   minAvailable: 2
   selector:
     matchLabels:
-      ray.io/group-name: gpu-workers
-      ray.io/cluster: vllm-serve
-
+      ray.io/node-type: worker
+      ray.io/serve: "true"

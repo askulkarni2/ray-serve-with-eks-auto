@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ecr-push-ray-2-51-image
+  namespace: default
+spec:
+  serviceAccountName: ecr-push-sa
+  restartPolicy: Never
+  containers:
+  - name: image-pusher
+    image: amazon/aws-cli:latest
+    command:
+    - bash
+    - -c
+    - |
+      set -e
+      echo "Installing regctl..."
+      curl -L https://github.com/regclient/regclient/releases/latest/download/regctl-linux-amd64 -o /usr/local/bin/regctl
+      chmod +x /usr/local/bin/regctl
+      
+      echo "Getting ECR login token..."
+      ECR_PASSWORD=$(aws ecr get-login-password --region us-west-2)
+      
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      
+      echo "Authenticating to ECR..."
+      regctl registry login ${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com --user AWS --pass-stdin <<< "$ECR_PASSWORD"
+      
+      echo "Copying Ray 2.51.0 image from Docker Hub to ECR..."
+      regctl image copy rayproject/ray:2.51.0-py311-gpu ${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.51.0-py311-gpu
+      
+      echo "Successfully pushed image to ECR!"
+      echo "Image URI: ${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ray-serve:2.51.0-py311-gpu"
+    env:
+    - name: AWS_REGION
+      value: us-west-2

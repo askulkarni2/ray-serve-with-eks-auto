@@ -56,12 +56,13 @@ export const options = {
 };
 
 export default function () {
-  const NLB_ENDPOINT = __ENV.NLB_ENDPOINT || 'http://vllm-serve-nlb:8000';
+  const TARGET_URL = __ENV.TARGET_URL || 'http://vllm-serve-nlb:8000';
   
   const prompt = generateRandomPrompt();
   const maxTokens = Math.floor(Math.random() * 100) + 50; // 50-150 tokens
   
   const payload = JSON.stringify({
+    model: 'qwen-0.5b',
     prompt: prompt,
     max_tokens: maxTokens,
     temperature: 0.7,
@@ -75,7 +76,7 @@ export default function () {
   };
 
   const startTime = Date.now();
-  const response = http.post(`${NLB_ENDPOINT}/infer`, payload, params);
+  const response = http.post(`${TARGET_URL}/v1/completions`, payload, params);
   const duration = Date.now() - startTime;
 
   // Record metrics
@@ -83,10 +84,10 @@ export default function () {
   
   const success = check(response, {
     'status is 200': (r) => r.status === 200,
-    'has generated_text': (r) => {
+    'has completion': (r) => {
       try {
         const body = JSON.parse(r.body);
-        return body.generated_text !== undefined;
+        return body.choices && body.choices.length > 0 && body.choices[0].text !== undefined;
       } catch (e) {
         return false;
       }

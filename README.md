@@ -3,13 +3,13 @@
 <div align="center">
 
 ![EKS](https://img.shields.io/badge/Amazon_EKS_1.33-232F3E?style=for-the-badge&logo=amazoneks&logoColor=FF9900)
-![Ray](https://img.shields.io/badge/Ray_2.50-00A1E0?style=for-the-badge&logo=ray&logoColor=white)
-![vLLM](https://img.shields.io/badge/vLLM_0.6.3-76B900?style=for-the-badge&logo=python&logoColor=white)
+![Ray](https://img.shields.io/badge/Ray_2.51-00A1E0?style=for-the-badge&logo=ray&logoColor=white)
+![vLLM](https://img.shields.io/badge/vLLM_0.11.0-76B900?style=for-the-badge&logo=python&logoColor=white)
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-527FFF?style=for-the-badge&logo=kubernetes&logoColor=white)
 
 </div>
 
-A production-ready deployment of Ray Serve with vLLM on Amazon EKS Auto Mode, serving LLM models from S3 with GPU acceleration.
+A production-ready deployment of Ray Serve with vLLM 0.11.0 on Amazon EKS Auto Mode, serving LLM models from S3 with GPU acceleration and OpenAI-compatible API endpoints.
 
 > ⚠️ **DISCLAIMER**: This project is provided as a reference example only and should not be used in production environments without proper review, testing, and modifications to meet your specific requirements. The author takes no responsibility for any issues, costs, or damages that may arise from using this code. This repository is maintained on a best-effort basis with no guarantees of support or updates.
 
@@ -35,10 +35,11 @@ A production-ready deployment of Ray Serve with vLLM on Amazon EKS Auto Mode, se
 This setup demonstrates:
 - **EKS 1.33 Auto Mode** - Fully managed Kubernetes with automatic node provisioning
 - **GPU Node Pool** - G6/G6e instances with NVIDIA L4 GPUs
-- **Ray Serve** - Scalable model serving framework
-- **vLLM** - High-performance LLM inference engine
-- **S3 CSI Driver** - Mount S3 buckets as volumes for model storage
+- **Ray Serve 2.51** - Scalable model serving framework with OpenAI-compatible API
+- **vLLM 0.11.0** - High-performance LLM inference engine with RunAI streamer
+- **S3 CSI Driver** - Mount S3 buckets as volumes for optimized model loading
 - **Pod Identity** - Secure AWS IAM integration
+- **OpenAI API** - Compatible endpoints for easy integration
 
 ## 🏗️ Architecture
 
@@ -49,9 +50,11 @@ This setup demonstrates:
 | Service | Purpose |
 |---------|---------|
 | ![EKS](https://img.shields.io/badge/Amazon_EKS-232F3E?style=for-the-badge&logo=amazoneks&logoColor=FF9900) | Kubernetes cluster management |
+| ![ElastiCache](https://img.shields.io/badge/ElastiCache-DC382D?style=for-the-badge&logo=redis&logoColor=white) | Redis cluster for Ray GCS fault tolerance |
 | ![S3](https://img.shields.io/badge/Amazon_S3-569A31?style=for-the-badge&logo=amazons3&logoColor=white) | Model storage |
 | ![IAM](https://img.shields.io/badge/IAM-DD344C?style=for-the-badge&logo=amazoniam&logoColor=white) | Pod Identity & permissions |
 | ![EC2](https://img.shields.io/badge/Amazon_EC2-76B900?style=for-the-badge&logo=amazonec2&logoColor=white) | GPU compute (G6/G6e) |
+| ![ELB](https://img.shields.io/badge/ELB-FF9900?style=for-the-badge&logo=awselasticloadbalancing&logoColor=white) | Network Load Balancer for external access |
 
 </div>
 
@@ -60,8 +63,8 @@ This setup demonstrates:
 > 💡 **Tip for Presentations**: When viewing on GitHub, click the diagram to see it in full size. For presentations, you can export this diagram using [Mermaid Live Editor](https://mermaid.live/) and adjust font sizes there.
 
 ```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'14px', 'fontFamily':'arial'}}}%%
-graph LR
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'18px', 'fontFamily':'arial'}}}%%
+graph TB
     subgraph EKS["🔷 EKS Auto Mode Cluster"]
         direction TB
         
@@ -69,52 +72,99 @@ graph LR
             direction LR
             SYS["System<br/>c6g.large"]
             GEN["General<br/>c6a.large"]
-            GPU["GPU<br/>g6.2xlarge<br/>L4"]
+            GPU["GPU<br/>g6.2xlarge<br/>NVIDIA L4"]
         end
         
-        subgraph Ray["Ray Serve"]
+        subgraph Ray["Ray Serve (HA)"]
             direction LR
-            HEAD["Head<br/>:8000"]
-            WORKER["Worker<br/>vLLM"]
+            HEAD["Head Node<br/>Dashboard :8265<br/>Serve :8000"]
+            W1["Worker 1<br/>vLLM + GPU"]
+            W2["Worker 2<br/>vLLM + GPU"]
+            W3["Worker 3<br/>vLLM + GPU"]
         end
         
-        subgraph Add["Addons"]
+        subgraph Storage["High Availability"]
+            direction LR
+            REDIS["ElastiCache<br/>Redis Cluster<br/>3 Nodes"]
+            PDB["Pod Disruption<br/>Budgets"]
+        end
+        
+        subgraph Add["Addons & Operators"]
             direction TB
-            S3CSI["S3 CSI"]
-            KR["KubeRay"]
+            S3CSI["S3 CSI Driver"]
+            KR["KubeRay 1.4.2"]
+            ACK["ACK ElastiCache<br/>Controller"]
         end
     end
     
     subgraph Cloud["☁️ AWS Services"]
         direction TB
-        S3["S3<br/>Models"]
-        IAM["Pod<br/>Identity"]
+        S3["S3 Bucket<br/>Model Storage"]
+        IAM["Pod Identity<br/>IAM Roles"]
+        EC["ElastiCache<br/>Redis"]
+        NLB["Network Load<br/>Balancer"]
     end
     
-    CLIENT["👤 Client"] --> HEAD
-    HEAD --> WORKER
-    WORKER --> GPU
-    WORKER --> S3CSI
-    S3CSI --> S3
-    IAM -.-> S3CSI
-    IAM -.-> WORKER
-    KR -.-> Ray
+    CLIENT["👤 Client"] -->|HTTP| NLB
+    NLB -->|:8000| HEAD
+    HEAD -->|Distribute| W1
+    HEAD -->|Distribute| W2
+    HEAD -->|Distribute| W3
+    
+    W1 --> GPU
+    W2 --> GPU
+    W3 --> GPU
+    
+    W1 -->|Mount| S3CSI
+    W2 -->|Mount| S3CSI
+    W3 -->|Mount| S3CSI
+    
+    S3CSI -->|Read Models| S3
+    
+    HEAD -->|GCS FT| REDIS
+    W1 -->|State| REDIS
+    W2 -->|State| REDIS
+    W3 -->|State| REDIS
+    
+    REDIS -.->|Managed| EC
+    
+    IAM -.->|Auth| S3CSI
+    IAM -.->|Auth| W1
+    IAM -.->|Auth| W2
+    IAM -.->|Auth| W3
+    IAM -.->|Auth| ACK
+    
+    KR -.->|Manages| Ray
+    ACK -.->|Provisions| REDIS
+    PDB -.->|Protects| Ray
     
     style EKS fill:#232F3E,stroke:#FF9900,stroke-width:3px,color:#fff
     style Pools fill:#527FFF,stroke:#3D5FBF,stroke-width:2px,color:#fff
     style Ray fill:#00A1E0,stroke:#0073A8,stroke-width:2px,color:#fff
+    style Storage fill:#E74C3C,stroke:#C0392B,stroke-width:2px,color:#fff
     style Add fill:#8C4FFF,stroke:#6B3DBF,stroke-width:2px,color:#fff
     style Cloud fill:#FF9900,stroke:#CC7A00,stroke-width:3px,color:#fff
+    
     style GPU fill:#76B900,stroke:#5A8C00,stroke-width:2px,color:#fff
     style HEAD fill:#00D4FF,stroke:#00A1CC,stroke-width:2px,color:#000
-    style WORKER fill:#00D4FF,stroke:#00A1CC,stroke-width:2px,color:#000
+    style W1 fill:#00D4FF,stroke:#00A1CC,stroke-width:2px,color:#000
+    style W2 fill:#00D4FF,stroke:#00A1CC,stroke-width:2px,color:#000
+    style W3 fill:#00D4FF,stroke:#00A1CC,stroke-width:2px,color:#000
+    
+    style REDIS fill:#DC382D,stroke:#A52A2A,stroke-width:2px,color:#fff
+    style PDB fill:#E74C3C,stroke:#C0392B,stroke-width:1px,color:#fff
+    
     style S3 fill:#569A31,stroke:#3F7320,stroke-width:2px,color:#fff
     style IAM fill:#DD344C,stroke:#B02838,stroke-width:2px,color:#fff
-    style CLIENT fill:#232F3E,stroke:#FF9900,stroke-width:2px,color:#fff
+    style EC fill:#DC382D,stroke:#A52A2A,stroke-width:2px,color:#fff
+    style NLB fill:#FF9900,stroke:#CC7A00,stroke-width:2px,color:#fff
+    
+    style CLIENT fill:#34495E,stroke:#2C3E50,stroke-width:2px,color:#fff
     style SYS fill:#527FFF,stroke:#3D5FBF,stroke-width:1px,color:#fff
     style GEN fill:#527FFF,stroke:#3D5FBF,stroke-width:1px,color:#fff
     style S3CSI fill:#569A31,stroke:#3F7320,stroke-width:1px,color:#fff
     style KR fill:#8C4FFF,stroke:#6B3DBF,stroke-width:1px,color:#fff
+    style ACK fill:#8C4FFF,stroke:#6B3DBF,stroke-width:1px,color:#fff
 ```
 
 ### Component Details
@@ -125,10 +175,14 @@ graph LR
 | **System Nodes** | c6g.large | Core system pods (CoreDNS, kube-proxy) |
 | **General Nodes** | c6a.large | General workloads, operators |
 | **GPU Nodes** | g6.2xlarge | Ray workers with NVIDIA L4 GPUs |
-| **Ray Head** | Pod | Ray cluster coordinator, dashboard, serve endpoint |
-| **Ray Worker** | Pod | vLLM inference engine with GPU |
-| **S3 CSI** | Driver | Mounts S3 bucket as volume |
-| **Pod Identity** | IAM | Secure AWS service access |
+| **Ray Head** | Pod | Ray cluster coordinator, dashboard, OpenAI-compatible API endpoint |
+| **Ray Workers (3x)** | Pods | vLLM 0.11.0 inference engines with GPU, RunAI streamer, anti-affinity placement |
+| **ElastiCache Redis** | Managed | 3-node Redis cluster for Ray GCS fault tolerance |
+| **S3 CSI** | Driver | Mounts S3 bucket as volume for model storage |
+| **Pod Identity** | IAM | Secure AWS service access without IRSA |
+| **ACK Controller** | Operator | Manages ElastiCache resources via Kubernetes CRDs |
+| **KubeRay 1.4.2** | Operator | Manages Ray cluster lifecycle and HA configuration |
+| **Network Load Balancer** | AWS | External access to Ray Serve API |
 
 ## 🎯 Features
 
@@ -143,14 +197,21 @@ graph LR
 - Support for G6 and G6e instance families
 
 ✅ **Model Serving**
-- Ray Serve for production-grade serving
-- vLLM for optimized LLM inference
-- S3-backed model storage
+- Ray Serve 2.51 with OpenAI-compatible API
+- vLLM 0.11.0 for optimized LLM inference
+- RunAI streamer for faster model loading from S3
+- S3-backed model storage with PVC mounting
 - Pod Identity for secure AWS access
+
+✅ **OpenAI Compatibility**
+- `/v1/chat/completions` endpoint
+- Compatible with OpenAI Python client
+- Streaming support
+- Standard request/response format
 
 ✅ **High Availability**
 - PodDisruptionBudgets for zero-downtime updates
-- Redis external storage for Ray GCS fault tolerance
+- ElastiCache Redis for Ray GCS fault tolerance
 - Rolling update controls with node disruption limits
 - Minimum replica guarantees during maintenance
 
@@ -225,22 +286,22 @@ This creates a node pool with:
 
 **⏱️ Time: Instant (nodes provision on-demand)**
 
-### 4. Push Ray 2.50.0 Image to ECR
+### 4. Push Ray 2.51.0 Image to ECR
 
-Cache the Ray 2.50.0 image in your ECR repository for faster pulls:
+Cache the Ray 2.51.0 image in your ECR repository for faster pulls:
 
 ```bash
-# Push Ray 2.50.0 image to ECR
-kubectl apply -f app/ecr-push-image.yaml
+# Push Ray 2.51.0 image to ECR
+kubectl apply -f app/ecr-push-ray-2.51-image.yaml
 
 # Wait for completion (takes ~1-2 minutes)
-kubectl logs -f ecr-push-ray-image
+kubectl logs -f ecr-push-ray-2-51-image
 
 # Clean up
-kubectl delete pod ecr-push-ray-image
+kubectl delete pod ecr-push-ray-2-51-image
 ```
 
-This uses `regctl` to copy `rayproject/ray:2.50.0-py311-gpu` from Docker Hub to ECR in us-west-2. The Ray service configurations are already set to use the ECR image.
+This uses `regctl` to copy `rayproject/ray:2.51.0-py311-gpu` from Docker Hub to ECR in us-west-2. The Ray service configurations are already set to use the ECR image.
 
 **⏱️ Time: ~1-2 minutes**
 
@@ -286,35 +347,68 @@ This downloads `Qwen/Qwen2.5-0.5B-Instruct` from Hugging Face and uploads to S3.
 
 **⏱️ Time: ~2-3 minutes**
 
-### 7. Deploy Ray Serve with vLLM (High Availability)
+### 7. Deploy ElastiCache Redis with ACK (Optional but Recommended)
+
+For production deployments, use managed ElastiCache instead of in-cluster Redis:
+
+```bash
+# Install ACK ElastiCache Controller
+./scripts/install-ack-elasticache.sh
+
+# Deploy ElastiCache Redis cluster (3-node, Multi-AZ)
+./scripts/deploy-elasticache.sh
+```
+
+This creates:
+- 3-node Redis cluster with automatic failover
+- Multi-AZ deployment for high availability
+- Encryption at rest
+- Automated backups and maintenance windows
+- Security group with VPC-only access
+
+**⏱️ Time: ~15 minutes (ElastiCache provisioning)**
+
+**Benefits over in-cluster Redis**:
+- ✅ Fully managed by AWS (no maintenance overhead)
+- ✅ Automatic failover and recovery
+- ✅ Automated backups and point-in-time recovery
+- ✅ Better performance and reliability
+- ✅ Separate from EKS cluster lifecycle
+
+**Note**: The Ray Service configuration (`app/ray-serve-vllm-ha.yaml`) is already configured to use ElastiCache. If you skip this step, you can deploy in-cluster Redis by uncommenting the Redis StatefulSet section in the YAML.
+
+### 8. Deploy Ray Serve with vLLM 0.11.0 (High Availability)
 
 ```bash
 # Apply with environment variable substitution for AWS account ID
-./scripts/apply-with-envsubst.sh app/ray-serve-vllm-ha.yaml
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+cat app/ray-serve-vllm-v0.11.yaml | envsubst | kubectl apply -f -
 ```
 
 This deploys:
-- Redis for Ray GCS external storage (fault tolerance)
-- Ray head node with health checks
-- 3 Ray GPU workers with vLLM
+- Ray 2.51.0 with vLLM 0.11.0
+- OpenAI-compatible API endpoints
+- 3 Ray GPU workers with RunAI streamer for optimized model loading
 - PodDisruptionBudgets for zero-downtime upgrades
-- Service endpoints on port 8000
+- Service endpoints on port 8000 (`/v1/chat/completions`)
+- Integration with ElastiCache for GCS fault tolerance
 
 **⏱️ Time: ~5-7 minutes (includes model loading)**
 
 **Features**:
+- ✅ **vLLM 0.11.0** with RunAI streamer for faster model loading
+- ✅ **OpenAI-compatible API** at `/v1/chat/completions`
 - ✅ Zero-downtime cluster upgrades
 - ✅ 3 Ray workers with anti-affinity (spread across nodes)
-- ✅ 3 Redis replicas with anti-affinity (StatefulSet)
-- ✅ PodDisruptionBudgets (minAvailable: 2 workers, 1 head, 2 Redis)
+- ✅ ElastiCache Redis for Ray GCS fault tolerance
+- ✅ PodDisruptionBudgets (minAvailable: 2 workers, 1 head)
 - ✅ Graceful shutdown with preStop hooks
 - ✅ Health checks (readiness/liveness probes)
-- ✅ Redis external storage for Ray GCS fault tolerance
-- ✅ Persistent storage for Redis data
+- ✅ S3 model loading with RunAI streamer optimization
 
-**Note**: For basic deployment without HA features, use `app/ray-serve-vllm.yaml` instead.
+**Note**: For legacy deployment with vLLM 0.6.3, use `app/ray-serve-vllm-ha.yaml` instead.
 
-### 8. Expose External Access (Optional)
+### 9. Expose External Access (Optional)
 
 Deploy a Network Load Balancer for external API access:
 
@@ -329,37 +423,82 @@ kubectl get svc vllm-serve-nlb -o jsonpath='{.status.loadBalancer.ingress[0].hos
 
 **⏱️ Time: ~2 minutes**
 
-### 9. Test Inference
+### 10. Test Inference
 
-Test via internal service:
+Test via internal service with OpenAI-compatible API:
 ```bash
 kubectl run test-inference --rm -it --restart=Never \
   --image=curlimages/curl:latest -- \
-  curl -X POST http://vllm-serve-head-svc:8000/VLLMDeployment \
+  curl -X POST http://vllm-serve-nbfp4-head-svc:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "What is the capital of France?", "max_tokens": 100}'
+  -H "Authorization: Bearer fake-key" \
+  -d '{
+    "model": "qwen-0.5b",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "max_tokens": 100
+  }'
 ```
 
 Or test via external NLB (if deployed):
 ```bash
 NLB_ENDPOINT=$(kubectl get svc ray-serve-nlb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl -X POST http://$NLB_ENDPOINT/VLLMDeployment \
+curl -X POST http://$NLB_ENDPOINT/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "What is the capital of France?", "max_tokens": 100}'
+  -H "Authorization: Bearer fake-key" \
+  -d '{
+    "model": "qwen-0.5b",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "max_tokens": 100
+  }'
 ```
 
-Expected output:
+Expected output (OpenAI format):
 ```json
 {
-  "generated_text": " Paris\n\nThe capital of France is Paris, which is located on the north bank of the Seine river...",
-  "prompt": "What is the capital of France?",
-  "model": "/s3/models/Qwen/Qwen2.5-0.5B-Instruct"
+  "id": "chatcmpl-79db9869-f362-4bfd-bf32-708110404185",
+  "object": "chat.completion",
+  "created": 1762151002,
+  "model": "qwen-0.5b",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "The capital of France is Paris.",
+      "refusal": null
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 36,
+    "total_tokens": 44,
+    "completion_tokens": 8
+  }
 }
 ```
 
-**⏱️ Time: ~2-3 minutes first request (model loading), ~1-2 seconds subsequent requests**
+**Using Python OpenAI Client:**
+```python
+from openai import OpenAI
 
-**Note**: The first request to each worker takes longer as it loads the model into GPU memory. Subsequent requests are much faster.
+# Initialize client
+client = OpenAI(
+    base_url="http://vllm-serve-nbfp4-head-svc:8000/v1",
+    api_key="fake-key"
+)
+
+# Chat completion
+response = client.chat.completions.create(
+    model="qwen-0.5b",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+    max_tokens=100
+)
+
+print(response.choices[0].message.content)
+```
+
+**⏱️ Time: ~5-7 minutes first request (model loading with RunAI streamer), ~1-2 seconds subsequent requests**
+
+**Note**: The first request to each worker takes longer as it loads the model into GPU memory using RunAI streamer for optimized loading. Subsequent requests are much faster.
 
 ## 🔄 Zero-Downtime Cluster Upgrades
 
@@ -429,13 +568,15 @@ kubectl get pdb
 kubectl get pods -l ray.io/cluster -o wide
 ```
 
-**Redis Configuration**:
-- 3 Redis replicas in StatefulSet with persistent storage (10Gi per instance)
-- Anti-affinity spreads Redis across nodes for fault tolerance
-- PDB ensures 2 Redis instances always available during disruptions
-- Ray connects to primary Redis instance (redis-0) for GCS coordination
-- Persistent volumes ensure data survives pod restarts
-- No S3 GCS backup (Redis persistence + replication provides sufficient durability)
+**ElastiCache Redis Configuration**:
+- 3-node Redis cluster with automatic failover (Multi-AZ)
+- Managed by AWS ElastiCache service
+- Deployed via ACK (AWS Controllers for Kubernetes)
+- Ray connects via `gcsFaultToleranceOptions.redisAddress`
+- Encryption at rest enabled
+- Automated backups with 5-day retention
+- Separate from EKS cluster lifecycle (survives cluster deletion)
+- No in-cluster Redis overhead (CPU/memory savings)
 
 #### Testing Upgrade Simulation
 
@@ -775,11 +916,14 @@ workerGroupSpecs:
 ### Remove Application Components
 
 ```bash
-# Delete Ray Serve HA deployment (includes Redis)
+# Delete Ray Serve HA deployment
 kubectl delete -f app/ray-serve-vllm-ha.yaml
 
 # Or delete basic deployment
 kubectl delete -f app/ray-serve-vllm.yaml
+
+# Delete ElastiCache resources (if deployed via ACK)
+kubectl delete -f app/elasticache-redis.yaml
 
 # Delete optional components
 kubectl delete -f app/ray-serve-nlb.yaml

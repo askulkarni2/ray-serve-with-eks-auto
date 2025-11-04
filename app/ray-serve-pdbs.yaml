@@ -1,0 +1,26 @@
+---
+# PDB for Ray head node
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-serve-head-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      ray.io/node-type: head
+      ray.io/serve: "true"
+---
+# PDB for Ray workers - require at least 2 available during disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-serve-worker-pdb
+  namespace: default
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      ray.io/node-type: worker
+      ray.io/serve: "true"

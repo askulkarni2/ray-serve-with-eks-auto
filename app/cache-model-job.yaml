@@ -14,7 +14,7 @@ spec:
     driver: s3.csi.aws.com
     volumeHandle: s3-csi-driver-volume
     volumeAttributes:
-      bucketName: qwen-models-${AWS_ACCOUNT_ID}
+      bucketName: qwen-models-829527579886
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -55,27 +55,27 @@ spec:
         - |
           pip install huggingface_hub
           
-          export MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
-          export TEMP_DIR="/tmp/models/$MODEL_NAME"
-          export S3_DIR="/s3/models/$MODEL_NAME"
+          MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
+          TEMP_DIR="/tmp/models/Qwen/Qwen2.5-0.5B-Instruct"
+          S3_DIR="/s3/models/Qwen/Qwen2.5-0.5B-Instruct"
           
-          echo "Downloading model: $MODEL_NAME to temporary directory"
-          mkdir -p "$TEMP_DIR"
+          echo "Downloading model: ${MODEL_NAME} to temporary directory"
+          mkdir -p "${TEMP_DIR}"
           python -c "
           from huggingface_hub import snapshot_download
           snapshot_download(
-              repo_id='$MODEL_NAME',
-              local_dir='$TEMP_DIR',
+              repo_id='${MODEL_NAME}',
+              local_dir='${TEMP_DIR}',
               local_dir_use_symlinks=False
           )
           "
           
           echo "Copying model to S3..."
-          mkdir -p "$S3_DIR"
-          cp -r "$TEMP_DIR"/* "$S3_DIR/"
+          mkdir -p "${S3_DIR}"
+          cp -r "${TEMP_DIR}"/* "${S3_DIR}/"
           
           echo "Model cached successfully to S3!"
-          ls -lah "$S3_DIR"
+          ls -lah "${S3_DIR}"
         resources:
           requests:
             cpu: "2"

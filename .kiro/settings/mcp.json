@@ -57,7 +57,9 @@
         "FASTMCP_LOG_LEVEL": "ERROR"
       },
       "disabled": false,
-      "autoApprove": []
+      "autoApprove": [
+        "search_documentation"
+      ]
     },
     "aws-eks": {
       "command": "uvx",

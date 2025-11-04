@@ -1,0 +1,56 @@
+---
+# Note: Security Group will be created via AWS CLI in the deployment script
+---
+# Cache Subnet Group for ElastiCache
+apiVersion: elasticache.services.k8s.aws/v1alpha1
+kind: CacheSubnetGroup
+metadata:
+  name: ray-elasticache-subnet-group
+  namespace: default
+spec:
+  cacheSubnetGroupName: ray-elasticache-subnet-group
+  cacheSubnetGroupDescription: Subnet group for Ray ElastiCache Redis cluster
+  subnetIDs:
+    - ${SUBNET_ID_1}
+    - ${SUBNET_ID_2}
+    - ${SUBNET_ID_3}
+  tags:
+    - key: Name
+      value: ray-elasticache-subnet-group
+    - key: ManagedBy
+      value: ACK
+---
+# ElastiCache Replication Group (Redis Cluster)
+apiVersion: elasticache.services.k8s.aws/v1alpha1
+kind: ReplicationGroup
+metadata:
+  name: ray-redis-cluster
+  namespace: default
+spec:
+  replicationGroupID: ray-redis-cluster
+  replicationGroupDescription: Redis cluster for Ray GCS fault tolerance
+  engine: redis
+  engineVersion: "7.1"
+  cacheNodeType: cache.r7g.large
+  numCacheClusters: 3
+  automaticFailoverEnabled: true
+  multiAZEnabled: true
+  cacheSubnetGroupName: ray-elasticache-subnet-group
+  securityGroupIDs:
+    - ${SECURITY_GROUP_ID}
+  atRestEncryptionEnabled: true
+  transitEncryptionEnabled: false
+  # Note: Transit encryption requires auth token, which adds complexity
+  # For simplicity, we're using at-rest encryption only
+  port: 6379
+  snapshotRetentionLimit: 5
+  snapshotWindow: "03:00-05:00"
+  preferredMaintenanceWindow: "sun:05:00-sun:07:00"
+  autoMinorVersionUpgrade: true
+  tags:
+    - key: Name
+      value: ray-redis-cluster
+    - key: ManagedBy
+      value: ACK
+    - key: Purpose
+      value: RayGCS
