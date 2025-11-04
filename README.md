@@ -619,6 +619,82 @@ done
 10. **Only then** does Karpenter drain Node 2
 11. Process repeats for remaining workers
 
+#### Zero-Downtime Rolling Update Sequence
+
+```mermaid
+sequenceDiagram
+    participant EKS as EKS Control Plane
+    participant K8s as Kubernetes API
+    participant PDB as Pod Disruption Budget
+    participant NLB as Network Load Balancer
+    participant W1 as Worker 1 (Node A)
+    participant W2 as Worker 2 (Node B)
+    participant W3 as Worker 3 (Node C)
+    participant NewW as New Worker (New Node)
+    
+    Note over EKS,W3: Initial State: 3 Workers Running, All Healthy
+    NLB->>W1: Traffic (33%)
+    NLB->>W2: Traffic (33%)
+    NLB->>W3: Traffic (33%)
+    
+    Note over EKS,W3: Cluster Upgrade Initiated
+    EKS->>K8s: Trigger node replacement (Node A)
+    K8s->>PDB: Check if drain allowed
+    PDB->>PDB: Verify: 3 workers - 1 = 2 ≥ minAvailable(2) ✓
+    PDB->>K8s: Drain allowed
+    
+    Note over W1: Worker 1 begins graceful shutdown
+    K8s->>W1: Send SIGTERM
+    W1->>W1: preStop hook: ray stop --grace-period 30
+    W1->>W1: Drain in-flight requests (30s)
+    NLB->>W1: Stop routing new traffic
+    NLB->>W2: Traffic (50%)
+    NLB->>W3: Traffic (50%)
+    
+    Note over W1: Completing existing requests...
+    W1->>W1: Wait for requests to finish
+    W1->>K8s: Graceful shutdown complete
+    K8s->>W1: Terminate pod
+    
+    Note over NewW: New node provisions, new worker starts
+    K8s->>NewW: Create new worker pod
+    NewW->>NewW: Initialize Ray worker
+    NewW->>NewW: Load vLLM model (RunAI streamer)
+    NewW->>K8s: Readiness probe: ray health-check
+    K8s->>NewW: Mark as Ready
+    NLB->>NewW: Begin routing traffic
+    
+    Note over W2,NewW: Now 3 workers healthy again
+    NLB->>W2: Traffic (33%)
+    NLB->>W3: Traffic (33%)
+    NLB->>NewW: Traffic (33%)
+    
+    Note over EKS,NewW: Continue with Node B
+    K8s->>PDB: Check if drain allowed for Node B
+    PDB->>PDB: Verify: 3 workers - 1 = 2 ≥ minAvailable(2) ✓
+    PDB->>K8s: Drain allowed
+    
+    K8s->>W2: Send SIGTERM
+    W2->>W2: preStop hook: ray stop --grace-period 30
+    NLB->>W2: Stop routing new traffic
+    NLB->>W3: Traffic (50%)
+    NLB->>NewW: Traffic (50%)
+    
+    Note over W2: Graceful shutdown...
+    W2->>K8s: Shutdown complete
+    K8s->>W2: Terminate pod
+    
+    Note over EKS,NewW: Process repeats for remaining nodes
+    Note over W3,NewW: Zero downtime achieved! ✓
+```
+
+**Key Points:**
+- **PDB Enforcement**: Kubernetes checks PDB before allowing any disruption
+- **Graceful Shutdown**: 30-second drain period ensures no dropped requests
+- **Health Checks**: New workers must pass readiness probes before receiving traffic
+- **Sequential Updates**: Only one node disrupted at a time
+- **Traffic Continuity**: NLB automatically routes around unhealthy targets
+
 #### Cost Considerations
 
 **Before**: 1 workers = 1 × g6.2xlarge  
